@@ -111,7 +111,11 @@ def print_load_warning(missing: list[str], unexpected: list[str]) -> None:
         print(f"Got {len(unexpected)} unexpected keys:\n\t" + "\n\t".join(unexpected))
 
 
-def load_flow_model(name: str, device: str = "cuda", hf_download: bool = True):
+def load_flow_model(
+    name: str, device: str = "mps" if torch.backends.mps.is_available() else "cpu", hf_download: bool = True
+):
+    if torch.cuda.is_available():
+        device = "cuda"
     # Loading Flux
     print("Init model")
     ckpt_path = configs[name].ckpt_path
@@ -134,15 +138,17 @@ def load_flow_model(name: str, device: str = "cuda", hf_download: bool = True):
         print_load_warning(missing, unexpected)
     return model
 
+
 # from XLabs-AI https://github.com/XLabs-AI/x-flux/blob/1f8ef54972105ad9062be69fe6b7f841bce02a08/src/flux/util.py#L330
-def load_flow_model_quintized(name: str, device: str = "cuda", hf_download: bool = True):
+def load_flow_model_quintized(
+    name: str, device: str = "mps" if torch.backends.mps.is_available() else "cpu", hf_download: bool = True
+):
+    if torch.cuda.is_available():
+        device = "cuda"
     # Loading Flux
     print("Init model")
     ckpt_path = 'models/flux-dev-fp8.safetensors'
-    if (
-        not os.path.exists(ckpt_path)
-        and hf_download
-    ):
+    if not os.path.exists(ckpt_path) and hf_download:
         ckpt_path = hf_hub_download("XLabs-AI/flux-dev-fp8", "flux-dev-fp8.safetensors")
     json_path = hf_hub_download("XLabs-AI/flux-dev-fp8", 'flux_dev_quantization_map.json')
 
@@ -155,21 +161,30 @@ def load_flow_model_quintized(name: str, device: str = "cuda", hf_download: bool
         quantization_map = json.load(f)
     print("Start a quantization process...")
     from optimum.quanto import requantize
+
     requantize(model, sd, quantization_map, device=device)
     print("Model is quantized!")
     return model
 
 
-def load_t5(device: str = "cuda", max_length: int = 512) -> HFEmbedder:
+def load_t5(device: str = "mps" if torch.backends.mps.is_available() else "cpu", max_length: int = 512) -> HFEmbedder:
+    if torch.cuda.is_available():
+        device = "cuda"
     # max length 64, 128, 256 and 512 should work (if your sequence is short enough)
     return HFEmbedder("xlabs-ai/xflux_text_encoders", max_length=max_length, torch_dtype=torch.bfloat16).to(device)
 
 
-def load_clip(device: str = "cuda") -> HFEmbedder:
+def load_clip(device: str = "mps" if torch.backends.mps.is_available() else "cpu") -> HFEmbedder:
+    if torch.cuda.is_available():
+        device = "cuda"
     return HFEmbedder("openai/clip-vit-large-patch14", max_length=77, torch_dtype=torch.bfloat16).to(device)
 
 
-def load_ae(name: str, device: str = "cuda", hf_download: bool = True) -> AutoEncoder:
+def load_ae(
+    name: str, device: str = "mps" if torch.backends.mps.is_available() else "cpu", hf_download: bool = True
+) -> AutoEncoder:
+    if torch.cuda.is_available():
+        device = "cuda"
     ckpt_path = configs[name].ae_path
     if (
         not os.path.exists(ckpt_path)

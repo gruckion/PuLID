@@ -29,24 +29,70 @@ else:
     from pulid.attention_processor import AttnProcessor, IDAttnProcessor
 
 
-class PuLIDPipeline:
-    def __init__(self, *args, **kwargs):
+class PuLIDPipeline(nn.Module):
+    def __init__(self, device=None, weight_dtype=None):
         super().__init__()
-        self.device = 'cuda'
+        if device is None:
+            self.device = "mps" if torch.backends.mps.is_available() else "cpu"
+            if torch.cuda.is_available():
+                self.device = "cuda"
+        else:
+            self.device = device
+
+        # Determine appropriate dtype
+        if weight_dtype is not None:
+            self.weight_dtype = weight_dtype
+        else:
+            # Always use float32 for MPS or CPU to avoid half precision issues
+            is_cpu_or_mps = (
+                self.device == "mps"
+                or self.device == "cpu"
+                or (hasattr(self.device, 'type') and (self.device.type == "mps" or self.device.type == "cpu"))
+            )
+            if is_cpu_or_mps:
+                self.weight_dtype = torch.float32
+                print(f"Using float32 for {self.device} device")
+            else:
+                self.weight_dtype = torch.bfloat16
+
+        # Print configuration
+        print(f"Pipeline initialized with device: {self.device}, dtype: {self.weight_dtype}")
+
         sdxl_base_repo = 'stabilityai/stable-diffusion-xl-base-1.0'
         sdxl_lightning_repo = 'ByteDance/SDXL-Lightning'
         self.sdxl_base_repo = sdxl_base_repo
 
         # load base model
-        unet = UNet2DConditionModel.from_config(sdxl_base_repo, subfolder='unet').to(self.device, torch.float16)
-        unet.load_state_dict(
-            load_file(
-                hf_hub_download(sdxl_lightning_repo, 'sdxl_lightning_4step_unet.safetensors'), device=self.device
-            )
+        unet = UNet2DConditionModel.from_config(sdxl_base_repo, subfolder='unet').to(self.device, self.weight_dtype)
+
+        # Handle safetensors loading safely
+        safetensors_path = hf_hub_download(sdxl_lightning_repo, 'sdxl_lightning_4step_unet.safetensors')
+
+        # For MPS/CPU, load the weights to CPU first, then transfer to device
+        is_cpu_or_mps = (
+            self.device == "mps"
+            or self.device == "cpu"
+            or (hasattr(self.device, 'type') and (self.device.type == "mps" or self.device.type == "cpu"))
         )
+        if is_cpu_or_mps:
+            # Load without device specification for MPS/CPU
+            print(f"Loading safetensors without device specification for {self.device}")
+            state_dict = load_file(safetensors_path)
+            unet.load_state_dict(state_dict)
+        else:
+            # For CUDA devices with float16/bfloat16, use device specification
+            print(f"Loading safetensors with device specification: {self.device}")
+            unet.load_state_dict(load_file(safetensors_path, device=self.device))
+
         self.hack_unet_attn_layers(unet)
+
+        # Set variant to None for float32 to avoid fp16 issues
+        variant = None if self.weight_dtype == torch.float32 else "fp16"
+
+        # For MPS, need to load models in a specific sequence
+        print(f"Loading SDXL pipeline with dtype: {self.weight_dtype}, variant: {variant}")
         self.pipe = StableDiffusionXLPipeline.from_pretrained(
-            sdxl_base_repo, unet=unet, torch_dtype=torch.float16, variant="fp16"
+            sdxl_base_repo, unet=unet, torch_dtype=self.weight_dtype, variant=variant
         ).to(self.device)
         self.pipe.watermark = None
 
@@ -92,7 +138,10 @@ class PuLIDPipeline:
         self.handler_ante.prepare(ctx_id=0)
 
         gc.collect()
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        elif hasattr(torch, 'mps') and torch.backends.mps.is_available():
+            torch.mps.empty_cache()
 
         self.load_pretrain()
 

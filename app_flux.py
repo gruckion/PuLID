@@ -1,9 +1,22 @@
+import os
 import time
+
+# Disable MPS acceleration to avoid tensor type mismatches
+os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
 import gradio as gr
 import torch
 from einops import rearrange
 from PIL import Image
+
+# Check if MPS is available and set device accordingly
+if torch.backends.mps.is_available():
+    # Force CPU usage to avoid the MPS tensor type issues
+    default_device = "cpu"
+    print("MPS is available but using CPU to avoid tensor type issues")
+else:
+    default_device = "cpu"
+    print("Using CPU")
 
 from flux.sampling import denoise, get_noise, get_schedule, prepare, unpack
 from flux.util import (
@@ -32,6 +45,11 @@ def get_models(name: str, device: torch.device, offload: bool, fp8: bool):
 
 class FluxGenerator:
     def __init__(self, model_name: str, device: str, offload: bool, aggressive_offload: bool, args):
+        # Override device with default_device if it's "mps" to avoid MPS tensor issues
+        if device == "mps":
+            device = default_device
+            print(f"Overriding MPS device to {default_device}")
+
         self.device = torch.device(device)
         self.offload = offload
         self.aggressive_offload = aggressive_offload
@@ -42,31 +60,40 @@ class FluxGenerator:
             offload=self.offload,
             fp8=args.fp8,
         )
-        self.pulid_model = PuLIDPipeline(self.model, device="cpu" if offload else device, weight_dtype=torch.bfloat16,
-                                         onnx_provider=args.onnx_provider)
+        self.pulid_model = PuLIDPipeline(
+            self.model,
+            device="cpu" if offload else device,
+            weight_dtype=torch.bfloat16,
+            onnx_provider=args.onnx_provider,
+        )
         if offload:
-            self.pulid_model.face_helper.face_det.mean_tensor = self.pulid_model.face_helper.face_det.mean_tensor.to(torch.device("cuda"))
-            self.pulid_model.face_helper.face_det.device = torch.device("cuda")
-            self.pulid_model.face_helper.device = torch.device("cuda")
-            self.pulid_model.device = torch.device("cuda")
+            gpu_device = "mps" if torch.backends.mps.is_available() else "cpu"
+            if torch.cuda.is_available():
+                gpu_device = "cuda"
+            self.pulid_model.face_helper.face_det.mean_tensor = self.pulid_model.face_helper.face_det.mean_tensor.to(
+                gpu_device
+            )
+            self.pulid_model.face_helper.face_det.device = torch.device(gpu_device)
+            self.pulid_model.face_helper.device = torch.device(gpu_device)
+            self.pulid_model.device = torch.device(gpu_device)
         self.pulid_model.load_pretrain(args.pretrained_model, version=args.version)
 
     @torch.inference_mode()
     def generate_image(
-            self,
-            width,
-            height,
-            num_steps,
-            start_step,
-            guidance,
-            seed,
-            prompt,
-            id_image=None,
-            id_weight=1.0,
-            neg_prompt="",
-            true_cfg=1.0,
-            timestep_to_start_cfg=1,
-            max_sequence_length=128,
+        self,
+        width,
+        height,
+        num_steps,
+        start_step,
+        guidance,
+        seed,
+        prompt,
+        id_image=None,
+        id_weight=1.0,
+        neg_prompt="",
+        true_cfg=1.0,
+        timestep_to_start_cfg=1,
+        max_sequence_length=128,
     ):
         self.t5.max_length = max_sequence_length
 
@@ -106,7 +133,16 @@ class FluxGenerator:
         )
 
         if self.offload:
-            self.t5, self.clip = self.t5.to(self.device), self.clip.to(self.device)
+            self.t5, self.clip = self.t5.cpu(), self.clip.cpu()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            elif torch.backends.mps.is_available():
+                torch.mps.empty_cache()
+            gpu_device = "mps" if torch.backends.mps.is_available() else "cpu"
+            if torch.cuda.is_available():
+                gpu_device = "cuda"
+            self.pulid_model.components_to_device(torch.device(gpu_device))
+
         inp = prepare(t5=self.t5, clip=self.clip, img=x, prompt=opts.prompt)
         inp_neg = prepare(t5=self.t5, clip=self.clip, img=x, prompt=neg_prompt) if use_true_cfg else None
 
@@ -134,8 +170,15 @@ class FluxGenerator:
 
         # denoise initial noise
         x = denoise(
-            self.model, **inp, timesteps=timesteps, guidance=opts.guidance, id=id_embeddings, id_weight=id_weight,
-            start_step=start_step, uncond_id=uncond_id_embeddings, true_cfg=true_cfg,
+            self.model,
+            **inp,
+            timesteps=timesteps,
+            guidance=opts.guidance,
+            id=id_embeddings,
+            id_weight=id_weight,
+            start_step=start_step,
+            uncond_id=uncond_id_embeddings,
+            true_cfg=true_cfg,
             timestep_to_start_cfg=timestep_to_start_cfg,
             neg_txt=inp_neg["txt"] if use_true_cfg else None,
             neg_txt_ids=inp_neg["txt_ids"] if use_true_cfg else None,
@@ -169,6 +212,7 @@ class FluxGenerator:
         img = Image.fromarray((127.5 * (x + 1.0)).cpu().byte().numpy())
         return img, str(opts.seed), self.pulid_model.debug_img_list
 
+
 _HEADER_ = '''
 <div style="text-align: center; max-width: 650px; margin: 0 auto;">
     <h1 style="font-size: 2.5rem; font-weight: 700; margin-bottom: 1rem; display: contents;">PuLID for FLUX</h1>
@@ -192,8 +236,13 @@ If you have any questions or feedbacks, feel free to open a discussion or contac
 """  # noqa E501
 
 
-def create_demo(args, model_name: str, device: str = "cuda" if torch.cuda.is_available() else "cpu",
-                offload: bool = False, aggressive_offload: bool = False):
+def create_demo(
+    args,
+    model_name: str,
+    device: str = "cuda" if torch.cuda.is_available() else "cpu",
+    offload: bool = False,
+    aggressive_offload: bool = False,
+):
     generator = FluxGenerator(model_name, device, offload, aggressive_offload, args)
 
     with gr.Blocks() as demo:
@@ -211,15 +260,22 @@ def create_demo(args, model_name: str, device: str = "cuda" if torch.cuda.is_ava
                 start_step = gr.Slider(0, 10, 0, step=1, label="timestep to start inserting ID")
                 guidance = gr.Slider(1.0, 10.0, 4, step=0.1, label="Guidance")
                 seed = gr.Textbox(-1, label="Seed (-1 for random)")
-                max_sequence_length = gr.Slider(128, 512, 128, step=128,
-                                                label="max_sequence_length for prompt (T5), small will be faster")
+                max_sequence_length = gr.Slider(
+                    128, 512, 128, step=128, label="max_sequence_length for prompt (T5), small will be faster"
+                )
 
-                with gr.Accordion("Advanced Options (True CFG, true_cfg_scale=1 means use fake CFG, >1 means use true CFG, if using true CFG, we recommend set the guidance scale to 1)", open=False):    # noqa E501
+                with gr.Accordion(
+                    "Advanced Options (True CFG, true_cfg_scale=1 means use fake CFG, >1 means use true CFG, if using true CFG, we recommend set the guidance scale to 1)",
+                    open=False,
+                ):  # noqa E501
                     neg_prompt = gr.Textbox(
                         label="Negative Prompt",
-                        value="bad quality, worst quality, text, signature, watermark, extra limbs")
+                        value="bad quality, worst quality, text, signature, watermark, extra limbs",
+                    )
                     true_cfg = gr.Slider(1.0, 10.0, 1, step=0.1, label="true CFG scale")
-                    timestep_to_start_cfg = gr.Slider(0, 20, 1, step=1, label="timestep to start cfg", visible=args.dev)
+                    timestep_to_start_cfg = gr.Slider(
+                        0, 20, 1, step=1, label="timestep to start cfg", visible=args.dev
+                    )
 
                 generate_btn = gr.Button("Generate")
 
@@ -230,71 +286,78 @@ def create_demo(args, model_name: str, device: str = "cuda" if torch.cuda.is_ava
                 gr.Markdown(_CITE_)
 
         with gr.Row(), gr.Column():
-                gr.Markdown("## Examples")
-                example_inps = [
-                    [
-                        'a woman holding sign with glowing green text \"PuLID for FLUX\"',
-                        'example_inputs/liuyifei.png',
-                        4, 4, 2680261499100305976, 1
-                    ],
-                    [
-                        'portrait, side view',
-                        'example_inputs/liuyifei.png',
-                        4, 4, 1205240166692517553, 1
-                    ],
-                    [
-                        'white-haired woman with vr technology atmosphere, revolutionary exceptional magnum with remarkable details',  # noqa E501
-                        'example_inputs/liuyifei.png',
-                        4, 4, 6349424134217931066, 1
-                    ],
-                    [
-                        'a young child is eating Icecream',
-                        'example_inputs/liuyifei.png',
-                        4, 4, 10606046113565776207, 1
-                    ],
-                    [
-                        'a man is holding a sign with text \"PuLID for FLUX\", winter, snowing, top of the mountain',
-                        'example_inputs/pengwei.jpg',
-                        4, 4, 2410129802683836089, 1
-                    ],
-                    [
-                        'portrait, candle light',
-                        'example_inputs/pengwei.jpg',
-                        4, 4, 17522759474323955700, 1
-                    ],
-                    [
-                        'profile shot dark photo of a 25-year-old male with smoke escaping from his mouth, the backlit smoke gives the image an ephemeral quality, natural face, natural eyebrows, natural skin texture, award winning photo, highly detailed face, atmospheric lighting, film grain, monochrome',  # noqa E501
-                        'example_inputs/pengwei.jpg',
-                        4, 4, 17733156847328193625, 1
-                    ],
-                    [
-                        'American Comics, 1boy',
-                        'example_inputs/pengwei.jpg',
-                        1, 4, 13223174453874179686, 1
-                    ],
-                    [
-                        'portrait, pixar',
-                        'example_inputs/pengwei.jpg',
-                        1, 4, 9445036702517583939, 1
-                    ],
-                ]
-                gr.Examples(examples=example_inps, inputs=[prompt, id_image, start_step, guidance, seed, true_cfg],
-                            label='fake CFG')
+            gr.Markdown("## Examples")
+            example_inps = [
+                [
+                    'a woman holding sign with glowing green text \"PuLID for FLUX\"',
+                    'example_inputs/liuyifei.png',
+                    4,
+                    4,
+                    2680261499100305976,
+                    1,
+                ],
+                ['portrait, side view', 'example_inputs/liuyifei.png', 4, 4, 1205240166692517553, 1],
+                [
+                    'white-haired woman with vr technology atmosphere, revolutionary exceptional magnum with remarkable details',  # noqa E501
+                    'example_inputs/liuyifei.png',
+                    4,
+                    4,
+                    6349424134217931066,
+                    1,
+                ],
+                ['a young child is eating Icecream', 'example_inputs/liuyifei.png', 4, 4, 10606046113565776207, 1],
+                [
+                    'a man is holding a sign with text \"PuLID for FLUX\", winter, snowing, top of the mountain',
+                    'example_inputs/pengwei.jpg',
+                    4,
+                    4,
+                    2410129802683836089,
+                    1,
+                ],
+                ['portrait, candle light', 'example_inputs/pengwei.jpg', 4, 4, 17522759474323955700, 1],
+                [
+                    'profile shot dark photo of a 25-year-old male with smoke escaping from his mouth, the backlit smoke gives the image an ephemeral quality, natural face, natural eyebrows, natural skin texture, award winning photo, highly detailed face, atmospheric lighting, film grain, monochrome',  # noqa E501
+                    'example_inputs/pengwei.jpg',
+                    4,
+                    4,
+                    17733156847328193625,
+                    1,
+                ],
+                ['American Comics, 1boy', 'example_inputs/pengwei.jpg', 1, 4, 13223174453874179686, 1],
+                ['portrait, pixar', 'example_inputs/pengwei.jpg', 1, 4, 9445036702517583939, 1],
+            ]
+            gr.Examples(
+                examples=example_inps,
+                inputs=[prompt, id_image, start_step, guidance, seed, true_cfg],
+                label='fake CFG',
+            )
 
-                example_inps = [
-                    [
-                        'portrait, made of ice sculpture',
-                        'example_inputs/lecun.jpg',
-                        1, 1, 3811899118709451814, 5
-                    ],
-                ]
-                gr.Examples(examples=example_inps, inputs=[prompt, id_image, start_step, guidance, seed, true_cfg],
-                            label='true CFG')
+            example_inps = [
+                ['portrait, made of ice sculpture', 'example_inputs/lecun.jpg', 1, 1, 3811899118709451814, 5],
+            ]
+            gr.Examples(
+                examples=example_inps,
+                inputs=[prompt, id_image, start_step, guidance, seed, true_cfg],
+                label='true CFG',
+            )
 
         generate_btn.click(
             fn=generator.generate_image,
-            inputs=[width, height, num_steps, start_step, guidance, seed, prompt, id_image, id_weight, neg_prompt,
-                    true_cfg, timestep_to_start_cfg, max_sequence_length],
+            inputs=[
+                width,
+                height,
+                num_steps,
+                start_step,
+                guidance,
+                seed,
+                prompt,
+                id_image,
+                id_weight,
+                neg_prompt,
+                true_cfg,
+                timestep_to_start_cfg,
+                max_sequence_length,
+            ],
             outputs=[output_image, seed_output, intermediate_output],
         )
 
@@ -305,16 +368,28 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="PuLID for FLUX.1-dev")
-    parser.add_argument('--version', type=str, default='v0.9.1', help='version of the model', choices=['v0.9.0', 'v0.9.1'])
-    parser.add_argument("--name", type=str, default="flux-dev", choices=list('flux-dev'),
-                        help="currently only support flux-dev")
+    parser.add_argument(
+        '--version', type=str, default='v0.9.1', help='version of the model', choices=['v0.9.0', 'v0.9.1']
+    )
+    parser.add_argument(
+        "--name", type=str, default="flux-dev", choices=list('flux-dev'), help="currently only support flux-dev"
+    )
     parser.add_argument("--device", type=str, default="cuda", help="Device to use")
     parser.add_argument("--offload", action="store_true", help="Offload model to CPU when not in use")
-    parser.add_argument("--aggressive_offload", action="store_true", help="Offload model more aggressively to CPU when not in use, for 24G GPUs")
+    parser.add_argument(
+        "--aggressive_offload",
+        action="store_true",
+        help="Offload model more aggressively to CPU when not in use, for 24G GPUs",
+    )
     parser.add_argument("--fp8", action="store_true", help="use flux-dev-fp8 model")
-    parser.add_argument("--onnx_provider", type=str, default="gpu", choices=["gpu", "cpu"],
-                        help="set onnx_provider to cpu (default gpu) can help reduce RAM usage, and when combined with"
-                             "fp8 option, the peak RAM is under 15GB")
+    parser.add_argument(
+        "--onnx_provider",
+        type=str,
+        default="gpu",
+        choices=["gpu", "cpu"],
+        help="set onnx_provider to cpu (default gpu) can help reduce RAM usage, and when combined with"
+        "fp8 option, the peak RAM is under 15GB",
+    )
     parser.add_argument("--port", type=int, default=8080, help="Port to use")
     parser.add_argument("--dev", action='store_true', help="Development mode")
     parser.add_argument("--pretrained_model", type=str, help='for development')

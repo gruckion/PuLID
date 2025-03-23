@@ -29,14 +29,37 @@ else:
 
 
 class PuLIDPipeline:
-    def __init__(self, sdxl_repo='Lykon/dreamshaper-xl-lightning', sampler='dpmpp_sde', *args, **kwargs):
+    def __init__(self, sdxl_repo=None, sampler='dpmpp_2m', device=None):
         super().__init__()
-        self.device = 'cuda'
+        if device is None:
+            self.device = "mps" if torch.backends.mps.is_available() else "cpu"
+            if torch.cuda.is_available():
+                self.device = "cuda"
+        else:
+            self.device = device
 
-        # load base model
-        self.pipe = StableDiffusionXLPipeline.from_pretrained(sdxl_repo, torch_dtype=torch.float16, variant="fp16").to(
-            self.device
-        )
+        # Set appropriate dtype based on device
+        if (
+            isinstance(self.device, str)
+            and self.device == "cpu"
+            or (hasattr(self.device, 'type') and self.device.type == "cpu")
+        ):
+            self.weight_dtype = torch.float32
+            print("Using float32 on CPU device")
+        else:
+            self.weight_dtype = torch.float16
+
+        # Load SDXL model with appropriate dtype for the device
+        if sdxl_repo is None:
+            sdxl_repo = 'stabilityai/stable-diffusion-xl-base-1.0'
+
+        # Set variant to None for CPU to avoid fp16 issues
+        variant = None if self.weight_dtype == torch.float32 else "fp16"
+
+        self.pipe = StableDiffusionXLPipeline.from_pretrained(
+            sdxl_repo, torch_dtype=self.weight_dtype, variant=variant
+        ).to(self.device)
+
         self.pipe.watermark = None
         self.hack_unet_attn_layers(self.pipe.unet)
 
