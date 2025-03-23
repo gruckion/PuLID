@@ -1,6 +1,21 @@
+import os
 import gradio as gr
 import numpy as np
 import torch
+
+# Enable MPS fallback for operations not supported by MPS
+os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+
+# Use MPS if available
+if torch.backends.mps.is_available():
+    device = torch.device("mps")
+    # Use float32 to avoid half-precision errors
+    torch_dtype = torch.float32
+    print(f"Using MPS device with dtype: {torch_dtype}")
+else:
+    device = torch.device("cpu")
+    torch_dtype = torch.float32
+    print(f"MPS not available, using CPU with dtype: {torch_dtype}")
 
 from pulid import attention_processor as attention
 from pulid.pipeline import PuLIDPipeline
@@ -8,7 +23,8 @@ from pulid.utils import resize_numpy_image_long, seed_everything
 
 torch.set_grad_enabled(False)
 
-pipeline = PuLIDPipeline()
+# Create pipeline with MPS device and float32 dtype
+pipeline = PuLIDPipeline(device=device, weight_dtype=torch_dtype)
 
 # other params
 DEFAULT_NEGATIVE_PROMPT = (
@@ -36,24 +52,38 @@ def run(*args):
     else:
         raise ValueError
 
+    id_embeddings = None
     if id_image is not None:
-        id_image = resize_numpy_image_long(id_image, 1024)
-        id_embeddings = pipeline.get_id_embedding(id_image)
-        for supp_id_image in supp_images:
-            if supp_id_image is not None:
-                supp_id_image = resize_numpy_image_long(supp_id_image, 1024)
-                supp_id_embeddings = pipeline.get_id_embedding(supp_id_image)
-                id_embeddings = torch.cat(
-                    (id_embeddings, supp_id_embeddings if id_mix else supp_id_embeddings[:, :5]), dim=1
-                )
-    else:
-        id_embeddings = None
+        try:
+            id_image = resize_numpy_image_long(id_image, 1024)
+            id_embeddings = pipeline.get_id_embedding(id_image)
+
+            for supp_id_image in supp_images:
+                if supp_id_image is not None:
+                    supp_id_image = resize_numpy_image_long(supp_id_image, 1024)
+                    supp_id_embeddings = pipeline.get_id_embedding(supp_id_image)
+                    id_embeddings = torch.cat(
+                        (id_embeddings, supp_id_embeddings if id_mix else supp_id_embeddings[:, :5]), dim=1
+                    )
+        except Exception as e:
+            print(f"Error processing image: {e}")
+            import traceback
+
+            traceback.print_exc()
+            return [], []
 
     seed_everything(seed)
     ims = []
-    for _ in range(n_samples):
-        img = pipeline.inference(prompt, (1, H, W), neg_prompt, id_embeddings, id_scale, scale, steps)[0]
-        ims.append(np.array(img))
+    try:
+        for _ in range(n_samples):
+            img = pipeline.inference(prompt, (1, H, W), neg_prompt, id_embeddings, id_scale, scale, steps)[0]
+            ims.append(np.array(img))
+    except Exception as e:
+        print(f"Error during inference: {e}")
+        import traceback
+
+        traceback.print_exc()
+        return [], []
 
     return ims, pipeline.debug_img_list
 
@@ -61,7 +91,7 @@ def run(*args):
 _HEADER_ = '''
 <h2><b>Official Gradio Demo</b></h2><h2><a href='https://github.com/ToTheBeginning/PuLID' target='_blank'><b>PuLID: Pure and Lightning ID Customization via Contrastive Alignment</b></a></h2>
 
-**PuLID** is a tuning-free ID customization approach. PuLID maintains high ID fidelity while effectively reducing interference with the original model’s behavior.
+**PuLID** is a tuning-free ID customization approach. PuLID maintains high ID fidelity while effectively reducing interference with the original model's behavior.
 
 Code: <a href='https://github.com/ToTheBeginning/PuLID' target='_blank'>GitHub</a>. Techenical report: <a href='https://arxiv.org/abs/2404.16022' target='_blank'>ArXiv</a>.
 

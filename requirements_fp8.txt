@@ -16,3 +16,4 @@ onnxruntime-gpu
 accelerate
 SentencePiece
 safetensors
+huggingface-hub

@@ -12,7 +12,11 @@ from flux.modules.layers import (
     timestep_embedding,
 )
 
-DEVICE = torch.device("cuda")
+
+DEVICE = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+if torch.cuda.is_available():
+    DEVICE = torch.device("cuda")
+
 
 @dataclass
 class FluxParams:
@@ -42,9 +46,7 @@ class Flux(nn.Module):
         self.in_channels = params.in_channels
         self.out_channels = self.in_channels
         if params.hidden_size % params.num_heads != 0:
-            raise ValueError(
-                f"Hidden size {params.hidden_size} must be divisible by num_heads {params.num_heads}"
-            )
+            raise ValueError(f"Hidden size {params.hidden_size} must be divisible by num_heads {params.num_heads}")
         pe_dim = params.hidden_size // params.num_heads
         if sum(params.axes_dim) != pe_dim:
             raise ValueError(f"Got {params.axes_dim} but expected positional dim {pe_dim}")
@@ -131,14 +133,14 @@ class Flux(nn.Module):
             for i in range(len(self.single_blocks) // 2):
                 self.single_blocks[i] = self.single_blocks[i].to(DEVICE)
         for i, block in enumerate(self.single_blocks):
-            if aggressive_offload and i == len(self.single_blocks)//2:
+            if aggressive_offload and i == len(self.single_blocks) // 2:
                 # put first half of the single blcoks to cpu and last half to gpu
                 for j in range(len(self.single_blocks) // 2):
                     self.single_blocks[j].cpu()
                 for j in range(len(self.single_blocks) // 2, len(self.single_blocks)):
                     self.single_blocks[j] = self.single_blocks[j].to(DEVICE)
             x = block(img, vec=vec, pe=pe)
-            real_img, txt = x[:, txt.shape[1]:, ...], x[:, :txt.shape[1], ...]
+            real_img, txt = x[:, txt.shape[1] :, ...], x[:, : txt.shape[1], ...]
 
             if i % self.pulid_single_interval == 0 and id is not None:
                 real_img = real_img + id_weight * self.pulid_ca[ca_idx](id, real_img)

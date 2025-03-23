@@ -1,8 +1,20 @@
 import argparse
+import os
+
+# Disable MPS acceleration to avoid tensor type mismatches
+os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
 import gradio as gr
 import numpy as np
 import torch
+
+# Force CPU usage to avoid MPS type mismatches
+if torch.backends.mps.is_available():
+    print("MPS is available but using CPU to avoid tensor type issues")
+    device = torch.device("cpu")
+else:
+    device = torch.device("cpu")
+    print("Using CPU")
 
 from pulid import attention_processor as attention
 from pulid.pipeline_v1_1 import PuLIDPipeline
@@ -35,7 +47,8 @@ else:
     default_cfg = 7.0
     default_steps = 25
 
-pipeline = PuLIDPipeline(sdxl_repo=args.base, sampler=args.sampler)
+# Initialize the pipeline with the CPU device
+pipeline = PuLIDPipeline(sdxl_repo=args.base, sampler=args.sampler, device=device)
 
 # other params
 DEFAULT_NEGATIVE_PROMPT = (
@@ -146,7 +159,7 @@ def run(*args):
 _HEADER_ = '''
 <h2><b>Official Gradio Demo</b></h2><h2><a href='https://github.com/ToTheBeginning/PuLID' target='_blank'><b>PuLID: Pure and Lightning ID Customization via Contrastive Alignment</b></a></h2>
 
-**PuLID** is a tuning-free ID customization approach. PuLID maintains high ID fidelity while effectively reducing interference with the original model’s behavior.
+**PuLID** is a tuning-free ID customization approach. PuLID maintains high ID fidelity while effectively reducing interference with the original model's behavior.
 
 Code: <a href='https://github.com/ToTheBeginning/PuLID' target='_blank'>GitHub</a>. Paper: <a href='https://arxiv.org/abs/2404.16022' target='_blank'>ArXiv</a>.
 

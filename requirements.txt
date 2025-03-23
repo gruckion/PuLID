@@ -11,8 +11,13 @@ ftfy
 facexlib
 insightface
 onnxruntime
-onnxruntime-gpu
+onnxruntime-silicon
 accelerate
 SentencePiece
 safetensors
 torchsde
+huggingface-hub
+fastapi==0.109.0
+pydantic==2.6.3
+starlette<0.37.0
+uvicorn[standard]
